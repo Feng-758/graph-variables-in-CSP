@@ -31,7 +31,13 @@ Key simplifications:
 // BoolView represents a boolean variable by its index.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BoolView(pub usize);
-pub struct Conflict;
+
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    pub var: BoolView,
+    pub existing: bool,
+    pub requested: bool,
+}
 pub type Reason = Vec<BoolView>;
 
 // ------------------------------------------------------------
@@ -39,10 +45,10 @@ pub type Reason = Vec<BoolView>;
 // ------------------------------------------------------------
 pub trait PropagationActions {
     fn attach(&mut self, _v: BoolView) {}
+    /// Assign variable with explanation.
     /// Returns:
-    /// - None        -> variable is unassigned (⊥)
-    /// - Some(true)  -> assigned true
-    /// - Some(false) -> assigned false
+    /// - Ok(())     if assignment succeeds or is redundant
+    /// - Err(...)   if assignment contradicts existing value
     fn value(&mut self, v: BoolView) -> Result<Option<bool>, Conflict>;
     /// Assign variable with explanation.
     fn set_bool(&mut self, v: BoolView, val: bool, reason: Reason) -> Result<(), Conflict>;
@@ -308,9 +314,25 @@ impl PropagationActions for MiniActions {
     fn value(&mut self, v: BoolView) -> Result<Option<bool>, Conflict> {
         Ok(self.vals[v.0])
     }
-    fn set_bool(&mut self, v: BoolView, val: bool, _reason: Reason) -> Result<(), Conflict> {
-        self.vals[v.0] = Some(val);
-        Ok(())
+    fn set_bool(&mut self, v: BoolView, val: bool, _reason: Reason)
+        -> Result<(), Conflict>
+    {
+        match self.vals[v.0] {
+            None => {
+                self.vals[v.0] = Some(val);
+                Ok(())
+            }
+            Some(existing) if existing == val => {
+                Ok(())
+            }
+            Some(existing) => {
+                Err(Conflict {
+                    var: v,
+                    existing,
+                    requested: val,
+                })
+            }
+        }
     }
 }
 
@@ -336,9 +358,9 @@ mod tests {
               / \    / \
              v   v  v   v
             (1) (7)(4) (0)
-                  |
-                  v
-                 (2)
+                 |
+                 v
+                (2)
 
     -------------------------------------------
     Odd cycle:
@@ -430,15 +452,16 @@ mod tests {
 
         let mut nocq = NOCQ::new(e, v, game);
 
-        //make all edges defined true so recursion explores them
+        // Only set the path edges of the odd cycle to true.
+        // Leave the closing edge (e4: 3->1) as None so the propagator can set it to false.
         let mut actions = MiniActions::new(nedges);
-        for i in 0..nedges {
-            actions.vals[i] = Some(true);
-        }
+        actions.vals[2] = Some(true); // e2: 1 -> 2
+        actions.vals[3] = Some(true); // e3: 2 -> 3
+        actions.vals[4] = None;       // e4: 3 -> 1 (closing edge)
 
         let mut expl = ();
 
-        nocq.propagate(&mut actions, &mut expl);
+        nocq.propagate(&mut actions, &mut expl).unwrap();
 
         // odd cycle back-edge is e4 (3->1). Your noceager sets it to false.
         assert_eq!(actions.vals[4], Some(false));
@@ -457,18 +480,47 @@ mod tests {
 
         let mut nocq = NOCQ::new(e, v, game);
 
-        // make all edges defined true so recursion explores them
+        // Only set the even cycle edges to true:
+        // 4 -> 5 (e5), 5 -> 6 (e6), 6 -> 4 (e7).
+        // Leave everything else as None to avoid triggering odd-cycle constraints.
         let mut actions = MiniActions::new(nedges);
-        for i in 0..nedges {
-            actions.vals[i] = Some(true);
-        }
+        actions.vals[5] = Some(true); // e5: 4 -> 5
+        actions.vals[6] = Some(true); // e6: 5 -> 6
+        actions.vals[7] = Some(true); // e7: 6 -> 4 (even cycle close)
 
         let mut expl = ();
 
         // run propagate (should not fail in this toy setup)
-        nocq.propagate(&mut actions, &mut expl);
+        nocq.propagate(&mut actions, &mut expl).unwrap();
 
         // even cycle back-edge is e7 (6->4), should remain true
         assert_eq!(actions.vals[7], Some(true));
+    }
+
+    #[test]
+    fn test_nocq_conflict_when_edge_already_true() {
+        let game = build_test_game();
+        let nedges = game.targets.len();
+        let nverts = game.nvertices();
+
+        let e: Vec<BoolView> = (0..nedges).map(BoolView).collect();
+        let v: Vec<BoolView> = (0..nverts).map(BoolView).collect();
+        let mut nocq = NOCQ::new(e, v, game);
+
+        let mut actions = MiniActions::new(nedges);
+
+        // Only enable the odd-cycle path so the propagator reaches the cycle:
+        // 1 -> 2 (e2), 2 -> 3 (e3), 3 -> 1 (e4).
+        actions.vals[2] = Some(true); // e2: 1 -> 2
+        actions.vals[3] = Some(true); // e3: 2 -> 3
+
+        // Force the closing odd-cycle edge e4 to already be true.
+        // Propagator will try to set it false -> conflict.
+        actions.vals[4] = Some(true); // e4: 3 -> 1
+
+        let mut expl = ();
+
+        let res = nocq.propagate(&mut actions, &mut expl);
+        assert!(res.is_err());
     }
 }
