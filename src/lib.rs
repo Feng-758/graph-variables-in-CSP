@@ -1,22 +1,67 @@
+/*
+============================================================
+NOCQ – No Opponent Cycle (Parity Game toy propagator)
+
+This file is a minimal Rust practice version of a parity-game
+cycle detector propagator.
+
+Goal:
+- Detect cycles in a directed graph.
+- Compute the maximum priority on the cycle.
+- If the maximum priority is ODD:
+    -> disable the closing edge (set_bool(false)).
+- If EVEN:
+    -> do nothing.
+
+This is NOT connected to Huub yet.
+It is a standalone structural and recursion practice version.
+
+Key simplifications:
+- BoolView is just an index wrapper.
+- Reason = Vec<BoolView> (no sign stored).
+- MiniActions is a fake assignment store for testing.
+- ExplanationActions is implemented for () (unit type).
+============================================================
+*/
+
+// ------------------------------------------------------------
+// Basic SAT-like abstractions (minimal practice version)
+// ------------------------------------------------------------
+
+// BoolView represents a boolean variable by its index.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BoolView(pub usize);
 pub struct Conflict;
 pub type Reason = Vec<BoolView>;
 
+// ------------------------------------------------------------
+// Solver interaction traits
+// ------------------------------------------------------------
 pub trait PropagationActions {
     fn attach(&mut self, _v: BoolView) {}
-    /// Read current value:
-    /// - None  => unassigned (⊥)
-    /// - Some(true/false) => assigned
+    /// Returns:
+    /// - None        -> variable is unassigned (⊥)
+    /// - Some(true)  -> assigned true
+    /// - Some(false) -> assigned false
     fn value(&mut self, v: BoolView) -> Result<Option<bool>, Conflict>;
-    /// Assign a boolean with a reason (for explanation).
+    /// Assign variable with explanation.
     fn set_bool(&mut self, v: BoolView, val: bool, reason: Reason) -> Result<(), Conflict>;
 }
 
 pub trait ExplanationActions {
     fn new_explanation(&mut self) -> Reason;
+    /// In real solver: would add literal with polarity.
+    /// Here: only stores BoolView.
     fn add_literal(&mut self, reason: &mut Reason, v: BoolView, val: bool);
 }
+
+// ------------------------------------------------------------
+// Parity game structure
+// ------------------------------------------------------------
+//
+// priority[v] = priority of vertex v
+// outs[v]     = list of outgoing edge indices
+// targets[e]  = target vertex of edge e
 
 struct GAME {
     priority: Vec<u32>,
@@ -42,6 +87,14 @@ impl GAME {
     }
 }
 
+// ------------------------------------------------------------
+// NOCQ Propagator
+// ------------------------------------------------------------
+//
+// E: edge variables
+// V: vertex variables (not heavily used in this toy model)
+// game: underlying parity game graph
+
 struct NOCQ {
     E: Vec<BoolView>,
     V: Vec<BoolView>,
@@ -57,6 +110,32 @@ impl NOCQ {
         Self { E, V, game }
     }
 
+    /*
+    ------------------------------------------------------------
+    noceager – recursive cycle exploration
+
+    Parameters:
+    - path_v: current vertex path
+    - path_e: current edge path
+    - v:      current vertex
+    - e:      incoming edge
+    - defined: whether current edge is true
+
+    Logic:
+
+    1) If current vertex v already appears in path_v:
+         -> we found a cycle.
+         -> compute maximum priority on cycle.
+         -> if max priority is ODD:
+                disable closing edge (set_bool(false)).
+         -> return.
+
+    2) If current edge is defined true:
+         -> explore outgoing edges recursively.
+
+    This mirrors parity-game cycle detection logic.
+    ------------------------------------------------------------
+    */
     fn noceager<P, Expl>(
         &self,
         actions: &mut P,
@@ -87,14 +166,10 @@ impl NOCQ {
             let odd = (m % 2) == 1;
 
             if odd {
-                // reason <- clausify(¬path_E[i_v:])
-                let mut reason = Vec::new();
+                let mut reason = expl.new_explanation();
                 for &e_prime in &path_e[i_v..] {
-                    // add literal (E[e_prime] is false) == ¬E[e_prime]
-                    reason.push(self.E[e_prime]);
+                    expl.add_literal(&mut reason, self.E[e_prime], false);
                 }
-                
-                // if not ( 𝓔[e] <- (⊥, reason) ) then return ⊥
                 actions.set_bool(self.E[e], false, reason)?;
             }
 
@@ -141,6 +216,9 @@ impl NOCQ {
     }
 }
 
+// ------------------------------------------------------------
+// Generic Propagator interface
+// ------------------------------------------------------------
 pub trait Propagator<P, Expl> {
     fn initialize(&mut self, actions: &mut P) -> Result<(), Conflict>;
     fn propagate(&mut self, actions: &mut P, expl: &mut Expl) -> Result<(), Conflict>;
@@ -161,6 +239,21 @@ where
         Ok(())
     }
 
+    /*
+    ------------------------------------------------------------
+    propagate:
+
+    For every vertex:
+        For every outgoing edge:
+            If edge is defined (true or false):
+                start recursive cycle detection.
+
+    If a cycle with odd maximum priority is found:
+        -> disable the closing edge.
+
+    This is a brute-force exploration version.
+    ------------------------------------------------------------
+    */
     fn propagate(&mut self, actions: &mut P, expl: &mut Expl) -> Result<(), Conflict> {
         let n = self.game.nvertices();
 
@@ -184,6 +277,10 @@ where
     }
 }
 
+// ------------------------------------------------------------
+// Minimal explanation implementation for unit type.
+// Used only for testing.
+// ------------------------------------------------------------
 impl ExplanationActions for () {
     fn new_explanation(&mut self) -> Reason { Vec::new() }
     fn add_literal(&mut self, reason: &mut Reason, v: BoolView, _val: bool) {
@@ -191,6 +288,14 @@ impl ExplanationActions for () {
     }
 }
 
+// ------------------------------------------------------------
+// MiniActions
+//
+// Fake solver state used only for testing.
+// Stores Option<bool> for each edge variable.
+//
+// This replaces real SAT engine interaction.
+// ------------------------------------------------------------
 struct MiniActions {
     vals: Vec<Option<bool>>,
 }
@@ -213,38 +318,39 @@ impl PropagationActions for MiniActions {
 mod tests {
     use super::*;
 
+    /*
+    Parity game graph used for testing.
+
+    Graph structure (directed):
+
+                 (0)
+                /   \
+               v     v
+              (1)   (4)
+               |     |
+               v     v
+              (2)   (5)
+               |     |
+               v     v
+              (3)   (6)
+              / \    / \
+             v   v  v   v
+            (1) (7)(4) (0)
+                  |
+                  v
+                 (2)
+
+    -------------------------------------------
+    Odd cycle:
+        1 → 2 → 3 → 1
+        max priority = 5 (odd)
+
+    Even cycle:
+        4 → 5 → 6 → 4
+        max priority = 8 (even)
+    -------------------------------------------
+    */
     fn build_test_game() -> GAME {
-
-        /*
-                      (0)
-                     /   \
-                    v     v
-                   (1)   (4)
-                    |     |
-                    v     v
-                   (2)   (5)
-                    |     |
-                    v     v
-                   (3)   (6)
-                   / \    / \
-                  v   v  v   v
-                (1)  (7)(4)  (0)
-                      |
-                      v
-                     (2)
-
-        ------------------------------------------------
-        node info (player, priority):
-        (0): player A, p=0
-        (1): player B, p=2
-        (2): player B, p=5   // odd-cycle max
-        (3): player B, p=4
-        (4): player A, p=6
-        (5): player A, p=2
-        (6): player A, p=8   // even-cycle max
-        (7): player B, p=1
-        */
-
         GAME {
             // index = vertex id
             priority: vec![
@@ -311,6 +417,8 @@ mod tests {
     }
 
     #[test]
+    // All edges start as true.
+    // Odd cycle should disable edge e4 (3 -> 1).
     fn test_nocq_propagate_sets_edge_false_on_odd_cycle() {
         let game = build_test_game();
 
@@ -337,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    // Even cycle should NOT disable edge e7 (6 -> 4).
     fn test_nocq_does_not_disable_edge_on_even_cycle() {
         let game = build_test_game();
 
