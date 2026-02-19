@@ -1,0 +1,8 @@
+[package]
+name = "huub-noc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+huub = { git = "https://github.com/huub-solver/huub" }
+pindakaas = "0.2.3"
